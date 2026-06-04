@@ -1,21 +1,31 @@
 $ErrorActionPreference = "Stop"
 
 $AppName = "api"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RootDir = Resolve-Path (Join-Path $ScriptDir "..")
+$RepoUrl = "https://github.com/ESHAYAT102/api-client-tui.git"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\api"
 $Target = Join-Path $InstallDir "$AppName.exe"
+$CloneDir = Join-Path ([System.IO.Path]::GetTempPath()) "$AppName.install.$([System.Guid]::NewGuid().ToString('N'))"
 
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
     Write-Error "go is required but was not found in PATH"
 }
 
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Error "git is required but was not found in PATH"
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Push-Location $RootDir
 try {
+    git clone --depth 1 $RepoUrl $CloneDir
+    Push-Location $CloneDir
     go build -buildvcs=false -o $Target .
 } finally {
-    Pop-Location
+    if ((Get-Location).Path -eq $CloneDir) {
+        Pop-Location
+    }
+    if (Test-Path $CloneDir) {
+        Remove-Item -Recurse -Force $CloneDir
+    }
 }
 
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
