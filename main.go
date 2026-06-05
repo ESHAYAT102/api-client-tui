@@ -26,7 +26,9 @@ import (
 const (
 	focusMethod = iota
 	focusURL
+	focusTabs
 	focusPanel
+	focusBearer
 	focusSend
 	focusResponse
 )
@@ -45,30 +47,39 @@ type responseResult struct {
 }
 
 type savedConfig struct {
-	Method string `json:"method"`
-	URL    string `json:"url"`
-	Body   string `json:"body"`
+	Method    string `json:"method"`
+	URL       string `json:"url"`
+	Body      string `json:"body"`
+	Headers   string `json:"headers"`
+	Bearer    string `json:"bearer"`
+	ActiveTab int    `json:"active_tab"`
 }
 
 type model struct {
 	methods  table.Model
 	url      textinput.Model
 	body     textarea.Model
+	headers  textarea.Model
+	bearer   textinput.Model
 	response viewport.Model
 	spinner  spinner.Model
 
-	focus       int
-	loading     bool
-	responseSet bool
-	status      string
-	width       int
-	height      int
-	lastBody    []byte
-	httpClient  *http.Client
-	panelStyles panelStyles
+	focus        int
+	activeTab    int
+	tabsUnlocked bool
+	loading      bool
+	responseSet  bool
+	status       string
+	width        int
+	height       int
+	lastBody     []byte
+	httpClient   *http.Client
+	panelStyles  panelStyles
 }
 
 type panelStyles struct {
+	tab        lipgloss.Style
+	activeTab  lipgloss.Style
 	input      lipgloss.Style
 	focusInput lipgloss.Style
 	button     lipgloss.Style
@@ -135,6 +146,34 @@ func newModel() model {
 	body.Blur()
 	body.SetStyles(noCursorLineStyles(body))
 
+	headers := textarea.New()
+	headers.Placeholder = "Header Input Box\nContent-Type: application/json"
+	headers.SetValue("Content-Type: application/json")
+	if cfg.Headers != "" {
+		headers.SetValue(cfg.Headers)
+	}
+	headers.SetVirtualCursor(false)
+	headers.CharLimit = 20_000
+	headers.SetWidth(42)
+	headers.SetHeight(9)
+	headers.KeyMap.InsertNewline.SetEnabled(true)
+	headers.KeyMap.WordForward = key.NewBinding(key.WithKeys("alt+right", "ctrl+right", "alt+f"))
+	headers.KeyMap.WordBackward = key.NewBinding(key.WithKeys("alt+left", "ctrl+left", "alt+b"))
+	headers.KeyMap.DeleteWordBackward = key.NewBinding(key.WithKeys("alt+backspace", "ctrl+backspace", "ctrl+w"))
+	headers.KeyMap.DeleteWordForward = key.NewBinding(key.WithKeys("alt+delete", "ctrl+delete", "alt+d"))
+	headers.Blur()
+	headers.SetStyles(noCursorLineStyles(headers))
+
+	bearer := textinput.New()
+	bearer.Placeholder = "Bearer Token Input Box"
+	bearer.SetValue(cfg.Bearer)
+	bearer.SetVirtualCursor(false)
+	bearer.SetWidth(42)
+	bearer.CharLimit = 4096
+	bearer.KeyMap.DeleteWordBackward = key.NewBinding(key.WithKeys("alt+backspace", "ctrl+backspace", "ctrl+w"))
+	bearer.KeyMap.DeleteWordForward = key.NewBinding(key.WithKeys("alt+delete", "ctrl+delete", "alt+d"))
+	bearer.Blur()
+
 	response := viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	response.SoftWrap = true
 	response.FillHeight = true
@@ -150,11 +189,16 @@ func newModel() model {
 		methods:     methods,
 		url:         url,
 		body:        body,
+		headers:     headers,
+		bearer:      bearer,
 		response:    response,
 		spinner:     spin,
 		focus:       focusMethod,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 		panelStyles: styles,
+	}
+	if cfg.ActiveTab >= 0 && cfg.ActiveTab <= 2 {
+		m.activeTab = cfg.ActiveTab
 	}
 	if cfg.Method != "" {
 		for i, row := range m.methods.Rows() {
@@ -169,6 +213,13 @@ func newModel() model {
 
 func newStyles() panelStyles {
 	return panelStyles{
+		tab: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("250")).
+			PaddingRight(3),
+		activeTab: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("229")).
+			Underline(true).
+			PaddingRight(3),
 		input: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("250")).
@@ -236,9 +287,12 @@ func (m model) saveConfig() {
 		return
 	}
 	cfg := savedConfig{
-		Method: m.method(),
-		URL:    m.url.Value(),
-		Body:   m.body.Value(),
+		Method:    m.method(),
+		URL:       m.url.Value(),
+		Body:      m.body.Value(),
+		Headers:   m.headers.Value(),
+		Bearer:    m.bearer.Value(),
+		ActiveTab: m.activeTab,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -269,8 +323,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.nextFocus()
 		case "shift+tab":
 			m = m.prevFocus()
+		case "left", "h":
+			if m.focus == focusTabs {
+				m.activeTab = wrap(m.activeTab-1, 3)
+				m = m.focusTabPanel()
+			}
+		case "right", "l":
+			if m.focus == focusTabs {
+				m.activeTab = wrap(m.activeTab+1, 3)
+				m = m.focusTabPanel()
+			}
 		case "enter":
-			if m.focus == focusMethod || m.focus == focusURL || m.focus == focusSend {
+			if m.focus == focusMethod || m.focus == focusURL || m.focus == focusTabs || m.focus == focusBearer || m.focus == focusSend {
 				return m.startRequest()
 			}
 		case "ctrl+s":
@@ -303,6 +367,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.url, cmd = m.url.Update(msg)
 		case focusPanel:
 			m = m.updateActivePanelCursor(msg)
+		case focusBearer:
+			m.bearer, cmd = m.bearer.Update(msg)
 		}
 		return m, cmd
 	case spinner.TickMsg:
@@ -319,6 +385,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.url, cmd = m.url.Update(msg)
 	case focusPanel:
 		m, cmd = m.updateActivePanel(msg)
+	case focusBearer:
+		m.bearer, cmd = m.bearer.Update(msg)
 	case focusSend:
 		if key, ok := msg.(tea.KeyPressMsg); ok && (key.String() == "enter" || key.String() == " ") {
 			return m.startRequest()
@@ -370,6 +438,7 @@ func (m model) inputView() string {
 	sections := []string{
 		top,
 		"",
+		m.tabsView(),
 		m.panelView(),
 		"",
 		"",
@@ -383,7 +452,31 @@ func (m model) inputView() string {
 }
 
 func (m model) panelView() string {
-	return m.body.View()
+	switch m.activeTab {
+	case 1:
+		return m.headers.View()
+	case 2:
+		style := m.panelStyles.input
+		if m.focus == focusBearer {
+			style = m.panelStyles.focusInput
+		}
+		return style.Render(m.bearer.View())
+	default:
+		return m.body.View()
+	}
+}
+
+func (m model) tabsView() string {
+	tabs := []string{"Body", "Header", "Bearer"}
+	out := make([]string, len(tabs))
+	for i, tab := range tabs {
+		style := m.panelStyles.tab
+		if i == m.activeTab {
+			style = m.panelStyles.activeTab
+		}
+		out[i] = style.Render(tab)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, out...)
 }
 
 func (m model) sendView() string {
@@ -422,6 +515,8 @@ func (m model) applyLayout() model {
 
 	m.url.SetWidth(clamp(urlWidth, 24, inputWidth))
 	m.body.SetWidth(inputWidth)
+	m.headers.SetWidth(inputWidth)
+	m.bearer.SetWidth(max(1, inputWidth-4))
 	m.response.SetWidth(responseBoxWidth(outputWidth))
 	m.response.SetHeight(max(8, m.height-4))
 	return m
@@ -491,7 +586,14 @@ func (m model) cursor() *tea.Cursor {
 		methodWidth := lipgloss.Width(methodStyle.Render(m.method()))
 		return addOffset(m.url.Cursor(), methodWidth+4, 1)
 	case focusPanel:
-		return addOffset(m.body.Cursor(), 0, 4)
+		if m.activeTab == 0 {
+			return addOffset(m.body.Cursor(), 0, 5)
+		}
+		if m.activeTab == 1 {
+			return addOffset(m.headers.Cursor(), 0, 5)
+		}
+	case focusBearer:
+		return addOffset(m.bearer.Cursor(), 2, 6)
 	}
 	return nil
 }
@@ -542,19 +644,41 @@ func (m model) closeBodyPair(msg tea.KeyPressMsg) (model, bool) {
 
 func (m model) updateActivePanel(msg tea.Msg) (model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
-		if next, handled := m.closeBodyPair(keyMsg); handled {
-			return next, nil
+		if m.activeTab == 0 {
+			if next, handled := m.closeBodyPair(keyMsg); handled {
+				return next, nil
+			}
 		}
 	}
 
 	var cmd tea.Cmd
-	m.body, cmd = m.body.Update(msg)
+	switch m.activeTab {
+	case 1:
+		m.headers, cmd = m.headers.Update(msg)
+	default:
+		m.body, cmd = m.body.Update(msg)
+	}
 	return m, cmd
 }
 
 func (m model) updateActivePanelCursor(msg tea.Msg) model {
-	m.body, _ = m.body.Update(msg)
+	switch m.activeTab {
+	case 1:
+		m.headers, _ = m.headers.Update(msg)
+	default:
+		m.body, _ = m.body.Update(msg)
+	}
 	return m
+}
+
+func (m model) focusTabPanel() model {
+	m.blurAll()
+	if m.activeTab == 2 {
+		m.focus = focusBearer
+	} else {
+		m.focus = focusPanel
+	}
+	return m.focusCurrent()
 }
 
 func (m model) nextFocus() model {
@@ -563,8 +687,25 @@ func (m model) nextFocus() model {
 	case focusMethod:
 		m.focus = focusURL
 	case focusURL:
-		m.focus = focusPanel
+		if m.tabsUnlocked {
+			m.focus = focusTabs
+		} else {
+			m.tabsUnlocked = true
+			if m.activeTab == 2 {
+				m.focus = focusBearer
+			} else {
+				m.focus = focusPanel
+			}
+		}
+	case focusTabs:
+		if m.activeTab == 2 {
+			m.focus = focusBearer
+		} else {
+			m.focus = focusPanel
+		}
 	case focusPanel:
+		m.focus = focusSend
+	case focusBearer:
 		m.focus = focusSend
 	case focusSend:
 		if m.responseSet {
@@ -591,10 +732,28 @@ func (m model) prevFocus() model {
 		}
 	case focusURL:
 		m.focus = focusMethod
-	case focusPanel:
+	case focusTabs:
 		m.focus = focusURL
+	case focusPanel:
+		if m.tabsUnlocked {
+			m.focus = focusTabs
+		} else {
+			m.tabsUnlocked = true
+			m.focus = focusURL
+		}
+	case focusBearer:
+		if m.tabsUnlocked {
+			m.focus = focusTabs
+		} else {
+			m.tabsUnlocked = true
+			m.focus = focusURL
+		}
 	case focusSend:
-		m.focus = focusPanel
+		if m.activeTab == 2 {
+			m.focus = focusBearer
+		} else {
+			m.focus = focusPanel
+		}
 	case focusResponse:
 		m.focus = focusSend
 	default:
@@ -605,10 +764,10 @@ func (m model) prevFocus() model {
 
 func (m model) focusFromClick(mouse tea.Mouse) (model, tea.Cmd) {
 	m = m.blurAll()
-	bodyStart := 4
-	bodyEnd := 13
-	sendStart := 14
-	sendEnd := 16
+	bodyStart := 5
+	bodyEnd := 14
+	sendStart := 15
+	sendEnd := 17
 	switch {
 	case mouse.Y >= 0 && mouse.Y <= 2:
 		if mouse.X <= 12 {
@@ -616,12 +775,26 @@ func (m model) focusFromClick(mouse tea.Mouse) (model, tea.Cmd) {
 		} else {
 			m.focus = focusURL
 		}
+	case mouse.Y == 4:
+		m.focus = focusTabs
+		switch {
+		case mouse.X < 8:
+			m.activeTab = 0
+		case mouse.X < 18:
+			m.activeTab = 1
+		default:
+			m.activeTab = 2
+		}
 	case mouse.Y >= sendStart && mouse.Y <= sendEnd:
 		m.focus = focusSend
 		m = m.focusCurrent()
 		return m.startRequestModel()
 	case mouse.Y >= bodyStart && mouse.Y <= bodyEnd:
-		m.focus = focusPanel
+		if m.activeTab == 2 {
+			m.focus = focusBearer
+		} else {
+			m.focus = focusPanel
+		}
 	case m.responseSet && mouse.X > lipgloss.Width(m.inputView()):
 		m.focus = focusResponse
 	default:
@@ -646,6 +819,8 @@ func (m model) blurAll() model {
 	m.methods.Blur()
 	m.url.Blur()
 	m.body.Blur()
+	m.headers.Blur()
+	m.bearer.Blur()
 	return m
 }
 
@@ -657,7 +832,13 @@ func (m model) focusCurrent() model {
 		m.url.Focus()
 		m.url.CursorEnd()
 	case focusPanel:
-		m.body.Focus()
+		if m.activeTab == 1 {
+			m.headers.Focus()
+		} else {
+			m.body.Focus()
+		}
+	case focusBearer:
+		m.bearer.Focus()
 	}
 	return m
 }
@@ -679,6 +860,18 @@ func (m model) requestConfig() (*http.Request, error) {
 		return nil, err
 	}
 
+	headers, err := parseHeaders(m.headers.Value())
+	if err != nil {
+		return nil, err
+	}
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	if token := strings.TrimSpace(m.bearer.Value()); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -716,6 +909,22 @@ func sendRequestCmd(client *http.Client, req *http.Request) tea.Cmd {
 			},
 		}
 	}
+}
+
+func parseHeaders(raw string) (http.Header, error) {
+	headers := http.Header{}
+	for i, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("header line %d must use Name: value", i+1)
+		}
+		headers.Add(strings.TrimSpace(name), strings.TrimSpace(value))
+	}
+	return headers, nil
 }
 
 func renderResponse(result responseResult) string {
@@ -787,6 +996,16 @@ func normalizeURL(rawURL string) string {
 		return "http://" + rawURL
 	}
 	return "https://" + rawURL
+}
+
+func wrap(value, size int) int {
+	if value < 0 {
+		return size - 1
+	}
+	if value >= size {
+		return 0
+	}
+	return value
 }
 
 func clamp(value, minValue, maxValue int) int {
