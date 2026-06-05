@@ -496,7 +496,57 @@ func (m model) cursor() *tea.Cursor {
 	return nil
 }
 
+func bracketPair(r rune) (string, bool) {
+	switch r {
+	case '(':
+		return "()", true
+	case '[':
+		return "[]", true
+	case '{':
+		return "{}", true
+	case '"':
+		return `""`, true
+	case '\'':
+		return "''", true
+	case '`':
+		return "``", true
+	default:
+		return "", false
+	}
+}
+
+func (m model) closeBodyPair(msg tea.KeyPressMsg) (model, bool) {
+	k := msg.Key()
+	if k.Mod != 0 {
+		return m, false
+	}
+
+	runes := []rune(k.Text)
+	if len(runes) != 1 {
+		return m, false
+	}
+
+	pair, ok := bracketPair(runes[0])
+	if !ok {
+		return m, false
+	}
+
+	if m.body.CharLimit > 0 && m.body.Length()+len([]rune(pair)) > m.body.CharLimit {
+		return m, false
+	}
+
+	m.body.InsertString(pair)
+	m.body, _ = m.body.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
+	return m, true
+}
+
 func (m model) updateActivePanel(msg tea.Msg) (model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if next, handled := m.closeBodyPair(keyMsg); handled {
+			return next, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	m.body, cmd = m.body.Update(msg)
 	return m, cmd
