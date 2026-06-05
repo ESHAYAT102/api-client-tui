@@ -33,6 +33,8 @@ const (
 	focusResponse
 )
 
+const inputTextareaHeight = 6
+
 type responseMsg struct {
 	result responseResult
 	err    error
@@ -137,7 +139,7 @@ func newModel() model {
 	body.SetVirtualCursor(false)
 	body.CharLimit = 50_000
 	body.SetWidth(42)
-	body.SetHeight(9)
+	body.SetHeight(inputTextareaHeight)
 	body.KeyMap.InsertNewline.SetEnabled(true)
 	body.KeyMap.WordForward = key.NewBinding(key.WithKeys("alt+right", "ctrl+right", "alt+f"))
 	body.KeyMap.WordBackward = key.NewBinding(key.WithKeys("alt+left", "ctrl+left", "alt+b"))
@@ -155,7 +157,7 @@ func newModel() model {
 	headers.SetVirtualCursor(false)
 	headers.CharLimit = 20_000
 	headers.SetWidth(42)
-	headers.SetHeight(9)
+	headers.SetHeight(inputTextareaHeight)
 	headers.KeyMap.InsertNewline.SetEnabled(true)
 	headers.KeyMap.WordForward = key.NewBinding(key.WithKeys("alt+right", "ctrl+right", "alt+f"))
 	headers.KeyMap.WordBackward = key.NewBinding(key.WithKeys("alt+left", "ctrl+left", "alt+b"))
@@ -351,8 +353,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case responseMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.status = m.panelStyles.error.Render(msg.err.Error())
-			m.response.SetContent("Request failed:\n" + msg.err.Error())
+			m.status = ""
+			m.response.SetContent(formatRequestError(msg.err))
 			m.responseSet = true
 			return m, nil
 		}
@@ -765,9 +767,9 @@ func (m model) prevFocus() model {
 func (m model) focusFromClick(mouse tea.Mouse) (model, tea.Cmd) {
 	m = m.blurAll()
 	bodyStart := 5
-	bodyEnd := 14
-	sendStart := 15
-	sendEnd := 17
+	bodyEnd := bodyStart + inputTextareaHeight
+	sendStart := bodyEnd + 1
+	sendEnd := sendStart + 2
 	switch {
 	case mouse.Y >= 0 && mouse.Y <= 2:
 		if mouse.X <= 12 {
@@ -925,6 +927,14 @@ func parseHeaders(raw string) (http.Header, error) {
 		headers.Add(strings.TrimSpace(name), strings.TrimSpace(value))
 	}
 	return headers, nil
+}
+
+func formatRequestError(err error) string {
+	msg := err.Error()
+	if request, dialErr, ok := strings.Cut(msg, ": dial "); ok {
+		return fmt.Sprintf("Request failed:\n%s\nDial %s", request, dialErr)
+	}
+	return "Request failed:\n" + msg
 }
 
 func renderResponse(result responseResult) string {
