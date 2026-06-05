@@ -671,10 +671,10 @@ func sendRequestCmd(client *http.Client, req *http.Request) tea.Cmd {
 func renderResponse(result responseResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", statusStyle(result.statusCode).Render(result.status))
+	fmt.Fprintf(&b, "Body:\n%s\n\n", previewBody(result.body))
 	fmt.Fprintf(&b, "Time: %s\n", result.duration.Round(time.Millisecond))
 	fmt.Fprintf(&b, "Size: %d bytes\n\n", len(result.body))
-	fmt.Fprintf(&b, "Headers:\n%s\n", formatHeaders(result.headers))
-	fmt.Fprintf(&b, "Body:\n%s", previewBody(result.body))
+	fmt.Fprintf(&b, "Headers:\n%s", formatHeaders(result.headers))
 	return b.String()
 }
 
